@@ -81,6 +81,7 @@
   .btn:hover{filter:brightness(1.08)}
   .btn.ghost{background:transparent;color:var(--teal)}
   .btn.ghost:hover{background:var(--teal-soft)}
+  .btn.ghost.on{background:var(--teal);color:#fff}
   .btn.tiny{padding:4px 9px;font-size:12px;border-radius:7px}
   .btn.danger{border-color:var(--rust);background:transparent;color:var(--rust)}
   .btn.danger:hover{background:#f3ddd6}
@@ -199,6 +200,17 @@
         <div class="sub">Saldo por classe de ativo</div>
         <div id="invSummary"></div>
       </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="toolbar" style="margin-bottom:2px">
+        <div style="flex:1">
+          <h2>Gastos mês a mês por categoria</h2>
+          <div class="sub">Últimos 6 meses · agrupado por tipo de gasto</div>
+        </div>
+        <button class="btn ghost tiny" id="heatWhoBtn" onclick="toggleHeatWho()">Separar por quem</button>
+      </div>
+      <div id="heatmap" style="margin-top:10px"></div>
     </div>
   </section>
 
@@ -1008,6 +1020,9 @@ function renderDash(){
       const v=inv[a];return `<div class="it"><span class="sw" style="background:${PALETTE[i%PALETTE.length]}"></span>
         <span class="nm">${esc(a)}</span><span class="vl">${(v.bal/invTot*100).toFixed(0)}% · ${brl(v.bal)}</span></div>`;
     }).join('')+'</div>';
+
+  // heatmap mês a mês por categoria/tipo
+  renderHeatmap();
 }
 function renderBreakdowns(key,tot){
   const exps=S.expenses.filter(e=>e.date&&e.date.slice(0,7)===key);
@@ -1030,6 +1045,106 @@ function kindClassColor(k){k=(k||'').toLowerCase();
   if(k.startsWith('essenc'))return '#0f5e4e';
   if(k.startsWith('super')||k.startsWith('súp'))return '#a8482e';
   return '#c08a2d';}
+
+/* ============ HEATMAP MÊS A MÊS POR CATEGORIA/TIPO ============ */
+let heatWho=false; // false = visão única; true = uma tabela por pessoa
+function toggleHeatWho(){
+  heatWho=!heatWho;
+  document.getElementById('heatWhoBtn').classList.toggle('on',heatWho);
+  document.getElementById('heatWhoBtn').textContent=heatWho?'Ver tudo junto':'Separar por quem';
+  renderHeatmap();
+}
+// últimos 6 meses terminando no mês selecionado, do mais antigo ao mais recente
+function lastNMonthKeys(n){
+  const out=[];
+  for(let i=n-1;i>=0;i--){
+    let y=curY,m=curM-i; while(m<0){m+=12;y--;}
+    out.push({key:`${y}-${String(m+1).padStart(2,'0')}`,label:MONTHS[m].slice(0,3),y});
+  }
+  return out;
+}
+// agrupa gastos (opcionalmente filtrados por pessoa) em {tipo: {categoria: {mesKey: valor}}}
+function buildHeatData(months,who){
+  const exps=who?S.expenses.filter(e=>e.who===who):S.expenses;
+  const monthKeys=new Set(months.map(m=>m.key));
+  const tree={};
+  exps.forEach(e=>{
+    if(!e.date||!monthKeys.has(e.date.slice(0,7)))return;
+    const kind=e.kind||'(sem tipo)', cat=e.cat||'Sem categoria', mk=e.date.slice(0,7);
+    if(!tree[kind])tree[kind]={};
+    if(!tree[kind][cat])tree[kind][cat]={};
+    tree[kind][cat][mk]=(tree[kind][cat][mk]||0)+e.val;
+  });
+  return tree;
+}
+function heatColor(v,max){
+  if(!v||!max)return 'transparent';
+  const t=Math.min(1,v/max);
+  // interpola do fundo do card (quase transparente) até o teal do tema
+  const alpha=0.12+t*0.78;
+  return `rgba(15,94,78,${alpha.toFixed(2)})`;
+}
+function heatTextColor(v,max){
+  if(!v||!max)return 'var(--muted)';
+  return (v/max)>0.55?'#fff':'var(--ink)';
+}
+function buildHeatTable(months,tree,titleSuffix){
+  // ordem dos tipos: os cadastrados em S.kinds primeiro (na ordem cadastrada), depois quaisquer outros
+  const kindOrder=[...S.kinds.filter(k=>tree[k]),...Object.keys(tree).filter(k=>!S.kinds.includes(k))];
+  if(!kindOrder.length)return `<div class="empty">Sem gastos nos últimos ${months.length} meses${titleSuffix?` para ${esc(titleSuffix)}`:''}.</div>`;
+
+  // máximo global (pra escala de cor consistente entre tipos/categorias)
+  let globalMax=0;
+  kindOrder.forEach(k=>Object.values(tree[k]).forEach(catMonths=>Object.values(catMonths).forEach(v=>{if(v>globalMax)globalMax=v;})));
+
+  let html=`<div style="overflow:auto"><table style="min-width:560px">
+    <thead><tr><th style="min-width:160px">Categoria</th>${months.map(m=>`<th class="num">${esc(m.label)}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>`;
+
+  kindOrder.forEach(kind=>{
+    const cats=Object.keys(tree[kind]);
+    const catTotals=cats.map(c=>({c,tot:months.reduce((s,m)=>s+(tree[kind][c][m.key]||0),0)}))
+      .sort((a,b)=>b.tot-a.tot);
+    const kindTot=catTotals.reduce((s,x)=>s+x.tot,0);
+    html+=`<tr style="background:var(--paper)"><td colspan="${months.length+2}" style="font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${kindClassColor(kind)}">${esc(kind)} <span class="mut" style="text-transform:none;letter-spacing:0;font-weight:400">· ${brl(kindTot)}</span></td></tr>`;
+    catTotals.forEach(({c,tot})=>{
+      html+=`<tr><td>${esc(c)}</td>`+
+        months.map(m=>{
+          const v=tree[kind][c][m.key]||0;
+          return `<td class="num" style="background:${heatColor(v,globalMax)};color:${heatTextColor(v,globalMax)};border-radius:4px">${v?brl(v).replace('R$ ',''):'—'}</td>`;
+        }).join('')+
+        `<td class="num" style="font-weight:600">${brl(tot)}</td></tr>`;
+    });
+  });
+
+  // linha de total geral por mês
+  const monthTotals=months.map(m=>kindOrder.reduce((s,k)=>s+Object.values(tree[k]).reduce((s2,catMonths)=>s2+(catMonths[m.key]||0),0),0));
+  const grandTotal=monthTotals.reduce((s,v)=>s+v,0);
+  html+=`<tr style="font-weight:600;border-top:2px solid var(--line)"><td>Total</td>${monthTotals.map(v=>`<td class="num">${brl(v)}</td>`).join('')}<td class="num">${brl(grandTotal)}</td></tr>`;
+  html+='</tbody></table></div>';
+  return html;
+}
+function renderHeatmap(){
+  const el=document.getElementById('heatmap'); if(!el)return;
+  const months=lastNMonthKeys(6);
+  if(!heatWho){
+    const tree=buildHeatData(months,null);
+    el.innerHTML=buildHeatTable(months,tree,'');
+  }else{
+    if(!S.who.length){el.innerHTML='<div class="empty">Cadastre pessoas em Ajustes para separar por quem.</div>';return;}
+    el.innerHTML=`<div style="display:flex;gap:16px;overflow-x:auto;padding-bottom:4px">`+
+      S.who.map(w=>{
+        const tree=buildHeatData(months,w);
+        return `<div style="flex:1;min-width:480px">
+          <div style="font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px">
+            <span class="sw" style="width:11px;height:11px;border-radius:3px;display:inline-block;background:${PALETTE[S.who.indexOf(w)%PALETTE.length]}"></span>
+            ${esc(w)}
+          </div>
+          ${buildHeatTable(months,tree,w)}
+        </div>`;
+      }).join('')+
+      '</div>';
+  }
+}
 function renderDonut(real){
   const entries=Object.entries(real).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
   const tot=entries.reduce((s,[,v])=>s+v,0);
@@ -1131,25 +1246,27 @@ document.getElementById('modalbg').addEventListener('click',e=>{if(e.target.id==
 /* ============ IMPORT / EXPORT XLSX ============ */
 function exportXLSX(){
   const rows=S.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(e=>({
-    Data:fmtDate(e.date),Descrição:e.desc,Categoria:e.cat,Subcategoria:e.sub||'',
-    Quem:e.who||'','Tipo de gasto':e.kind||'','Tipo de compra':e.buy||'',
-    'Meio de pagamento':e.pay,'Valor (R$)':e.val,Parcela:e.inst||'',Subdetalhes:e.det||''
+    'Meio de pagamento':e.pay,Data:fmtDate(e.date),Descrição:e.desc,'Valor (R$)':e.val,Parcela:e.inst||'',
+    Categoria:e.cat,Subcategoria:e.sub||'',Quem:e.who||'','Tipo de gasto':e.kind||'','Tipo compra':e.buy||'',
+    Subdetalhes:e.det||''
   }));
-  if(!rows.length)rows.push({Data:'',Descrição:'',Categoria:'',Subcategoria:'',Quem:'',['Tipo de gasto']:'',['Tipo de compra']:'',['Meio de pagamento']:'',['Valor (R$)']:'',Parcela:'',Subdetalhes:''});
+  if(!rows.length)rows.push({['Meio de pagamento']:'',Data:'',Descrição:'',['Valor (R$)']:'',Parcela:'',Categoria:'',Subcategoria:'',Quem:'',['Tipo de gasto']:'',['Tipo compra']:'',Subdetalhes:''});
   const ws=XLSX.utils.json_to_sheet(rows);
-  ws['!cols']=[{wch:12},{wch:28},{wch:14},{wch:18},{wch:10},{wch:13},{wch:13},{wch:16},{wch:12},{wch:9},{wch:16}];
+  ws['!cols']=[{wch:16},{wch:12},{wch:28},{wch:12},{wch:9},{wch:14},{wch:18},{wch:10},{wch:13},{wch:13},{wch:16}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Gastos');
   const info=XLSX.utils.aoa_to_sheet([
     ['Como usar esta planilha'],
     ['1. Uma linha por gasto na aba "Gastos".'],
-    ['2. Data no formato dd/mm/aaaa.'],
-    ['3. Categoria e Subcategoria são livres — pode digitar o que quiser.'],
-    ['4. Quem: ' + S.who.join(' ou ') + '.'],
-    ['5. Tipo de gasto: ' + S.kinds.join(', ') + '.'],
-    ['6. Meio de pagamento (um dos cadastrados):'],
+    ['2. A ordem das colunas é: Meio de pagamento, Data, Descrição, Valor (R$), Parcela, Categoria, Subcategoria, Quem, Tipo de gasto, Tipo compra, Subdetalhes.'],
+    ['3. A importação reconhece as colunas pelo nome do cabeçalho, então a ordem pode ser alterada sem problema — só não renomeie os cabeçalhos.'],
+    ['4. Data no formato dd/mm/aaaa.'],
+    ['5. Categoria e Subcategoria são livres — pode digitar o que quiser.'],
+    ['6. Quem: ' + S.who.join(' ou ') + '.'],
+    ['7. Tipo de gasto: ' + S.kinds.join(', ') + '.'],
+    ['8. Meio de pagamento (um dos cadastrados):'],
     [S.pays.map(p=>p.name).join(', ')],
-    ['7. Cartões contam só como competência; Pix/Boleto contam como competência E caixa.'],
-    ['8. Reimporte pela aba Gastos do app, botão "Importar planilha".']
+    ['9. Cartões contam só como competência; Pix/Boleto contam como competência E caixa.'],
+    ['10. Reimporte pela aba Gastos do app, botão "Importar planilha".']
   ]);
   info['!cols']=[{wch:85}];
   XLSX.utils.book_append_sheet(wb,info,'Instruções');
